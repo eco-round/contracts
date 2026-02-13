@@ -5,27 +5,27 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {
     SafeERC20
 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {IERC4626} from "@openzeppelin/contracts/interfaces/IERC4626.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {
     ReentrancyGuard
 } from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
-import {IYieldProtocol} from "./interfaces/IYieldProtocol.sol";
 import {IVaultMatch} from "./interfaces/IVaultMatch.sol";
 
 /// @title VaultMatch
 /// @notice No-Loss Prediction Vault for EcoRound on Base Mainnet.
-/// @dev Hardcoded: USDC (Base) + Morpho Vault. Lifecycle: Open -> Locked -> Resolved -> Claim
+/// @dev Uses real USDC + Morpho ERC4626 Vault. Lifecycle: Open -> Locked -> Resolved -> Claim
 contract VaultMatch is IVaultMatch, Ownable, Pausable, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
     // ── Hardcoded Base Mainnet Addresses ─────────────────────────────────
     IERC20 public constant USDC =
         IERC20(0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913);
-    IYieldProtocol public constant MORPHO_VAULT =
-        IYieldProtocol(0x050cE30b927Da55177A4914EC73480238BAD56f0);
+    IERC4626 public constant MORPHO_VAULT =
+        IERC4626(0x050cE30b927Da55177A4914EC73480238BAD56f0);
 
-    // ── Immutables (set in constructor) ──────────────────────────────────
+    // ── Immutables ───────────────────────────────────────────────────────
     uint256 public immutable MATCH_ID;
     string public teamAName;
     string public teamBName;
@@ -96,7 +96,13 @@ contract VaultMatch is IVaultMatch, Ownable, Pausable, ReentrancyGuard {
         if (principal == 0) revert NothingToClaim();
 
         hasClaimed[msg.sender] = true;
-        USDC.safeTransfer(msg.sender, principal + yieldShare);
+
+        // Cap payout to actual balance to absorb ERC4626 rounding dust (typically 1 wei)
+        uint256 payout = principal + yieldShare;
+        uint256 available = USDC.balanceOf(address(this));
+        if (payout > available) payout = available;
+
+        USDC.safeTransfer(msg.sender, payout);
 
         emit Claimed(msg.sender, principal, yieldShare);
     }
@@ -115,7 +121,6 @@ contract VaultMatch is IVaultMatch, Ownable, Pausable, ReentrancyGuard {
         if (_winner != Team.TeamA && _winner != Team.TeamB)
             revert InvalidWinner();
 
-        // Fix #1: Division by zero guard
         uint256 totalWinSide = (_winner == Team.TeamA)
             ? totalTeamA
             : totalTeamB;
@@ -139,20 +144,24 @@ contract VaultMatch is IVaultMatch, Ownable, Pausable, ReentrancyGuard {
     function pause() external onlyOwner {
         _pause();
     }
-
     function unpause() external onlyOwner {
         _unpause();
     }
 
     /// @notice Emergency: withdraw all funds from Morpho back to this vault.
-    /// @dev Call this BEFORE emergencyRefund if match is Locked.
     function emergencyWithdrawFromYield() external onlyOwner whenPaused {
-        uint256 withdrawn = MORPHO_VAULT.withdrawAll(address(USDC));
-        emit EmergencyYieldWithdrawn(withdrawn);
+        uint256 shares = MORPHO_VAULT.balanceOf(address(this));
+        if (shares > 0) {
+            uint256 withdrawn = MORPHO_VAULT.redeem(
+                shares,
+                address(this),
+                address(this)
+            );
+            emit EmergencyYieldWithdrawn(withdrawn);
+        }
     }
 
     /// @notice Emergency: refund a specific user their full deposit.
-    /// @dev If match is Locked, call emergencyWithdrawFromYield first.
     function emergencyRefund(
         address user
     ) external onlyOwner whenPaused nonReentrant {
@@ -164,6 +173,10 @@ contract VaultMatch is IVaultMatch, Ownable, Pausable, ReentrancyGuard {
         hasClaimed[user] = true;
         userDeposits[user][Team.TeamA] = 0;
         userDeposits[user][Team.TeamB] = 0;
+
+        // Cap to actual balance to absorb ERC4626 rounding dust
+        uint256 available = USDC.balanceOf(address(this));
+        if (refund > available) refund = available;
 
         USDC.safeTransfer(user, refund);
         emit EmergencyRefund(user, refund);
@@ -180,7 +193,8 @@ contract VaultMatch is IVaultMatch, Ownable, Pausable, ReentrancyGuard {
     }
 
     function getYieldBalance() external view returns (uint256) {
-        return MORPHO_VAULT.getBalance(address(USDC));
+        return
+            MORPHO_VAULT.convertToAssets(MORPHO_VAULT.balanceOf(address(this)));
     }
 
     function getExpectedPayout(address user) external view returns (uint256) {
@@ -204,7 +218,6 @@ contract VaultMatch is IVaultMatch, Ownable, Pausable, ReentrancyGuard {
 
         principal = winDeposit + loseDeposit;
 
-        // Fix #1: Safe against division-by-zero (also guarded in resolveMatch)
         if (winDeposit > 0 && totalYield > 0) {
             uint256 totalWinSide = (winner == Team.TeamA)
                 ? totalTeamA
@@ -215,18 +228,24 @@ contract VaultMatch is IVaultMatch, Ownable, Pausable, ReentrancyGuard {
         }
     }
 
+    /// @dev ERC4626: deposit(assets, receiver) returns shares
     function _depositToYield() internal {
         uint256 total = totalTeamA + totalTeamB;
         if (total > 0) {
-            // No approval needed — infinite approval set in constructor
-            MORPHO_VAULT.deposit(address(USDC), total);
+            MORPHO_VAULT.deposit(total, address(this));
         }
     }
 
+    /// @dev ERC4626: redeem all shares back to USDC
     function _withdrawFromYield() internal {
-        uint256 totalDeposits = totalTeamA + totalTeamB;
-        if (totalDeposits > 0) {
-            uint256 totalWithdrawn = MORPHO_VAULT.withdrawAll(address(USDC));
+        uint256 shares = MORPHO_VAULT.balanceOf(address(this));
+        if (shares > 0) {
+            uint256 totalDeposits = totalTeamA + totalTeamB;
+            uint256 totalWithdrawn = MORPHO_VAULT.redeem(
+                shares,
+                address(this),
+                address(this)
+            );
             totalYield = totalWithdrawn > totalDeposits
                 ? totalWithdrawn - totalDeposits
                 : 0;
