@@ -1,16 +1,11 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-/// @title IVaultMatch
-/// @notice Interface for the EcoRound per-match prediction vault
 interface IVaultMatch {
-    // ─── Enums ───────────────────────────────────────────────────────────
-
     enum MatchStatus {
-        Open, // Accepting deposits & predictions
-        Locked, // Match started — no more deposits
-        Resolved, // Oracle submitted result
-        Settled // Payouts distributed
+        Open,
+        Locked,
+        Resolved
     }
 
     enum Team {
@@ -26,6 +21,7 @@ interface IVaultMatch {
     event MatchResolved(uint256 indexed matchId, Team winner);
     event Claimed(address indexed user, uint256 principal, uint256 yieldShare);
     event EmergencyRefund(address indexed user, uint256 amount);
+    event EmergencyYieldWithdrawn(uint256 amount);
     event OracleUpdated(address indexed oldOracle, address indexed newOracle);
 
     // ─── Errors ──────────────────────────────────────────────────────────
@@ -40,4 +36,5 @@ interface IVaultMatch {
     error OnlyOracle();
     error InvalidWinner();
     error AlreadyResolved();
+    error NoWinnerDeposits();
 }

@@ -14,14 +14,23 @@ import {IYieldProtocol} from "./interfaces/IYieldProtocol.sol";
 import {IVaultMatch} from "./interfaces/IVaultMatch.sol";
 
 /// @title VaultMatch
-/// @notice No-Loss Prediction Vault. Lifecycle: Open → Locked → Resolved → Claim
+/// @notice No-Loss Prediction Vault for EcoRound on Base Mainnet.
+/// @dev Hardcoded: USDC (Base) + Morpho Vault. Lifecycle: Open -> Locked -> Resolved -> Claim
 contract VaultMatch is IVaultMatch, Ownable, Pausable, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
-    IERC20 public immutable DEPOSIT_TOKEN;
-    IYieldProtocol public immutable YIELD_PROTOCOL;
-    uint256 public immutable MATCH_ID;
+    // ── Hardcoded Base Mainnet Addresses ─────────────────────────────────
+    IERC20 public constant USDC =
+        IERC20(0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913);
+    IYieldProtocol public constant MORPHO_VAULT =
+        IYieldProtocol(0x050cE30b927Da55177A4914EC73480238BAD56f0);
 
+    // ── Immutables (set in constructor) ──────────────────────────────────
+    uint256 public immutable MATCH_ID;
+    string public teamAName;
+    string public teamBName;
+
+    // ── State ────────────────────────────────────────────────────────────
     address public oracle;
     MatchStatus public status;
     Team public winner;
@@ -37,18 +46,19 @@ contract VaultMatch is IVaultMatch, Ownable, Pausable, ReentrancyGuard {
         address _owner,
         address _oracle,
         uint256 _matchId,
-        address _depositToken,
-        address _yieldProtocol
+        string memory _teamA,
+        string memory _teamB
     ) Ownable(_owner) {
         require(_oracle != address(0), "Invalid oracle");
-        require(_depositToken != address(0), "Invalid token");
-        require(_yieldProtocol != address(0), "Invalid yield protocol");
 
         oracle = _oracle;
         MATCH_ID = _matchId;
-        DEPOSIT_TOKEN = IERC20(_depositToken);
-        YIELD_PROTOCOL = IYieldProtocol(_yieldProtocol);
+        teamAName = _teamA;
+        teamBName = _teamB;
         status = MatchStatus.Open;
+
+        // Gas optimization: infinite approval to Morpho Vault once
+        USDC.forceApprove(address(MORPHO_VAULT), type(uint256).max);
     }
 
     modifier onlyOracle() {
@@ -66,7 +76,7 @@ contract VaultMatch is IVaultMatch, Ownable, Pausable, ReentrancyGuard {
         if (team != Team.TeamA && team != Team.TeamB) revert InvalidTeam();
         if (amount == 0) revert ZeroAmount();
 
-        DEPOSIT_TOKEN.safeTransferFrom(msg.sender, address(this), amount);
+        USDC.safeTransferFrom(msg.sender, address(this), amount);
         userDeposits[msg.sender][team] += amount;
 
         if (team == Team.TeamA) {
@@ -86,7 +96,7 @@ contract VaultMatch is IVaultMatch, Ownable, Pausable, ReentrancyGuard {
         if (principal == 0) revert NothingToClaim();
 
         hasClaimed[msg.sender] = true;
-        DEPOSIT_TOKEN.safeTransfer(msg.sender, principal + yieldShare);
+        USDC.safeTransfer(msg.sender, principal + yieldShare);
 
         emit Claimed(msg.sender, principal, yieldShare);
     }
@@ -104,6 +114,12 @@ contract VaultMatch is IVaultMatch, Ownable, Pausable, ReentrancyGuard {
         if (status != MatchStatus.Locked) revert MatchNotLocked();
         if (_winner != Team.TeamA && _winner != Team.TeamB)
             revert InvalidWinner();
+
+        // Fix #1: Division by zero guard
+        uint256 totalWinSide = (_winner == Team.TeamA)
+            ? totalTeamA
+            : totalTeamB;
+        if (totalWinSide == 0) revert NoWinnerDeposits();
 
         status = MatchStatus.Resolved;
         winner = _winner;
@@ -123,10 +139,20 @@ contract VaultMatch is IVaultMatch, Ownable, Pausable, ReentrancyGuard {
     function pause() external onlyOwner {
         _pause();
     }
+
     function unpause() external onlyOwner {
         _unpause();
     }
 
+    /// @notice Emergency: withdraw all funds from Morpho back to this vault.
+    /// @dev Call this BEFORE emergencyRefund if match is Locked.
+    function emergencyWithdrawFromYield() external onlyOwner whenPaused {
+        uint256 withdrawn = MORPHO_VAULT.withdrawAll(address(USDC));
+        emit EmergencyYieldWithdrawn(withdrawn);
+    }
+
+    /// @notice Emergency: refund a specific user their full deposit.
+    /// @dev If match is Locked, call emergencyWithdrawFromYield first.
     function emergencyRefund(
         address user
     ) external onlyOwner whenPaused nonReentrant {
@@ -139,7 +165,7 @@ contract VaultMatch is IVaultMatch, Ownable, Pausable, ReentrancyGuard {
         userDeposits[user][Team.TeamA] = 0;
         userDeposits[user][Team.TeamB] = 0;
 
-        DEPOSIT_TOKEN.safeTransfer(user, refund);
+        USDC.safeTransfer(user, refund);
         emit EmergencyRefund(user, refund);
     }
 
@@ -154,7 +180,7 @@ contract VaultMatch is IVaultMatch, Ownable, Pausable, ReentrancyGuard {
     }
 
     function getYieldBalance() external view returns (uint256) {
-        return YIELD_PROTOCOL.getBalance(address(DEPOSIT_TOKEN));
+        return MORPHO_VAULT.getBalance(address(USDC));
     }
 
     function getExpectedPayout(address user) external view returns (uint256) {
@@ -178,28 +204,29 @@ contract VaultMatch is IVaultMatch, Ownable, Pausable, ReentrancyGuard {
 
         principal = winDeposit + loseDeposit;
 
+        // Fix #1: Safe against division-by-zero (also guarded in resolveMatch)
         if (winDeposit > 0 && totalYield > 0) {
             uint256 totalWinSide = (winner == Team.TeamA)
                 ? totalTeamA
                 : totalTeamB;
-            yieldShare = (totalYield * winDeposit) / totalWinSide;
+            if (totalWinSide > 0) {
+                yieldShare = (totalYield * winDeposit) / totalWinSide;
+            }
         }
     }
 
     function _depositToYield() internal {
         uint256 total = totalTeamA + totalTeamB;
         if (total > 0) {
-            DEPOSIT_TOKEN.safeIncreaseAllowance(address(YIELD_PROTOCOL), total);
-            YIELD_PROTOCOL.deposit(address(DEPOSIT_TOKEN), total);
+            // No approval needed — infinite approval set in constructor
+            MORPHO_VAULT.deposit(address(USDC), total);
         }
     }
 
     function _withdrawFromYield() internal {
         uint256 totalDeposits = totalTeamA + totalTeamB;
         if (totalDeposits > 0) {
-            uint256 totalWithdrawn = YIELD_PROTOCOL.withdrawAll(
-                address(DEPOSIT_TOKEN)
-            );
+            uint256 totalWithdrawn = MORPHO_VAULT.withdrawAll(address(USDC));
             totalYield = totalWithdrawn > totalDeposits
                 ? totalWithdrawn - totalDeposits
                 : 0;
