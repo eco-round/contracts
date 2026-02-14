@@ -5,10 +5,8 @@ libs = ["lib"]
 
 [etherscan]
 mainnet = { key = "${ETHERSCAN_API_KEY}" }
-base-sepolia = { key = "${ETHERSCAN_API_KEY}" }
 
 [rpc_endpoints]
 unknown_chain = { key = "${TENDERLY_ACCESS_KEY}", chain = 84531, url = "${TENDERLY_VIRTUAL_TESTNET_RPC_URL}/verify" }
-base-sepolia = "${BASE_SEPOLIA_RPC_URL}"
 
 # See more config options https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options

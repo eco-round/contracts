@@ -8,11 +8,11 @@ import {VaultMatch} from "../src/VaultMatch.sol";
 contract VaultMatchScript is Script {
     function run() public returns (address) {
         uint256 privateKey = vm.envUint("PRIVATE_KEY");
-        address owner = vm.envAddress("OWNER_ADDRESS");
-        address oracle = vm.envAddress("ORACLE_ADDRESS");
-        uint256 matchId = vm.envUint("MATCH_ID");
-        string memory teamA = vm.envString("TEAM_A");
-        string memory teamB = vm.envString("TEAM_B");
+        address owner = address(0x6b732552C0E06F69312D7E81969E28179E228C20);
+        address oracle = address(0xc82f469Aa95a2f7792300c8d11230e9023A98600);
+        uint256 matchId = 1;
+        string memory teamA = "Team A";
+        string memory teamB = "Team B";
 
         vm.startBroadcast(privateKey);
 
