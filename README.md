@@ -1,66 +1,80 @@
-## Foundry
+# EcoRound — Smart Contracts
 
-**Foundry is a blazing fast, portable and modular toolkit for Ethereum application development written in Rust.**
+Foundry project containing the two core contracts deployed on a **Tenderly virtual fork of Base Mainnet**.
 
-Foundry consists of:
+## Contracts
 
-- **Forge**: Ethereum testing framework (like Truffle, Hardhat and DappTools).
-- **Cast**: Swiss army knife for interacting with EVM smart contracts, sending transactions and getting chain data.
-- **Anvil**: Local Ethereum node, akin to Ganache, Hardhat Network.
-- **Chisel**: Fast, utilitarian, and verbose solidity REPL.
+### `FactoryMatch.sol`
+Factory that deploys a new `VaultMatch` per match. Maintains a registry of all vaults.
 
-## Documentation
+| Function | Description |
+|---|---|
+| `createMatch(teamA, teamB)` | Deploys a new VaultMatch, returns `(matchId, vaultAddress)` |
+| `getVault(matchId)` | Returns vault address for a given match ID |
+| `nextMatchId()` | Current match counter |
 
-https://book.getfoundry.sh/
+### `VaultMatch.sol`
+Per-match no-loss prediction vault. Lifecycle: **Open → Locked → Resolved → Claim**
 
-## Usage
+| Function | Access | Description |
+|---|---|---|
+| `deposit(team, amount)` | Public | Deposit USDC to predict a team (Open only) |
+| `lockMatch()` | Oracle | Locks match, deposits all USDC into Morpho |
+| `resolveMatch(winner)` | Oracle | Redeems from Morpho, distributes yield |
+| `claim()` | Public | Winners get deposit + yield share; losers get full deposit back |
+| `getTotalDeposits()` | View | Total USDC deposited |
+| `getYieldBalance()` | View | Current yield accrued in Morpho |
 
-### Build
+### `IVaultMatch.sol`
+Interface defining shared enums, events, and errors.
 
-```shell
-$ forge build
+- `MatchStatus`: `Open(0)`, `Locked(1)`, `Resolved(2)`
+- `Team`: `None(0)`, `TeamA(1)`, `TeamB(2)`
+
+## Deployed Addresses (Tenderly Base Fork)
+
+| Contract | Address |
+|---|---|
+| **FactoryMatch** | `0x602473fc59ff5eefbe5d6c86d3af5c64ac7987bc` |
+| **USDC** (Base native) | `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913` |
+| **Morpho ERC4626 Vault** | `0x050cE30b927Da55177A4914EC73480238BAD56f0` |
+
+> VaultMatch contracts are deployed per match by the factory. Each match gets its own vault.
+
+## Network
+
+| Parameter | Value |
+|---|---|
+| Chain ID | `84531` |
+| RPC | `https://virtual.rpc.tenderly.co/ecoround/ecoround/private/ecoround/9cf903bc-95b4-4882-bf0d-1625e4dca2b5` |
+| Explorer | [Tenderly Dashboard](https://dashboard.tenderly.co/EndPx/project/testnet/ecoround-base) |
+
+## Setup & Usage
+
+```bash
+# Install Foundry
+curl -L https://foundry.paradigm.xyz | bash && foundryup
+
+cd contracts
+
+# Build
+forge build
+
+# Test
+forge test -vvv
+
+# Deploy FactoryMatch to Tenderly fork
+forge script script/Deploy.s.sol \
+  --rpc-url $RPC_URL \
+  --private-key $PRIVATE_KEY \
+  --broadcast
 ```
 
-### Test
+## Yield Mechanics
 
-```shell
-$ forge test
-```
-
-### Format
-
-```shell
-$ forge fmt
-```
-
-### Gas Snapshots
-
-```shell
-$ forge snapshot
-```
-
-### Anvil
-
-```shell
-$ anvil
-```
-
-### Deploy
-
-```shell
-$ forge script script/Counter.s.sol:CounterScript --rpc-url <your_rpc_url> --private-key <your_private_key>
-```
-
-### Cast
-
-```shell
-$ cast <subcommand>
-```
-
-### Help
-
-```shell
-$ forge --help
-$ anvil --help
-$ cast --help
-```
+1. Users deposit USDC during Open phase — funds sit in the VaultMatch
+2. Oracle calls `lockMatch()` → all USDC deposited into Morpho ERC4626 vault
+3. While Locked, Morpho accrues yield on USDC
+4. Oracle calls `resolveMatch(winner)` → Morpho redeems all shares → `totalYield` calculated
+5. Winners call `claim()` → receive principal + proportional yield share
+6. Losers call `claim()` → receive 100% principal back (no loss)

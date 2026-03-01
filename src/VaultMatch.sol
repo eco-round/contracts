@@ -6,17 +6,21 @@ import {
     SafeERC20
 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {IERC4626} from "@openzeppelin/contracts/interfaces/IERC4626.sol";
-import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {
     ReentrancyGuard
 } from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {IVaultMatch} from "./interfaces/IVaultMatch.sol";
+import {Receiver} from "./receiver/Receiver.sol";
 
 /// @title VaultMatch
 /// @notice No-Loss Prediction Vault for EcoRound on Base Mainnet.
 /// @dev Uses real USDC + Morpho ERC4626 Vault. Lifecycle: Open -> Locked -> Resolved -> Claim
-contract VaultMatch is IVaultMatch, Ownable, Pausable, ReentrancyGuard {
+///
+/// Oracle model:
+///   oracle  = Chainlink Keystone Forwarder address (routes CRE workflow reports)
+///   owner() = admin EOA / panel-v2 (can also call lockMatch/resolveMatch directly)
+contract VaultMatch is IVaultMatch, Pausable, ReentrancyGuard, Receiver {
     using SafeERC20 for IERC20;
 
     // ── Hardcoded Base Mainnet Addresses ─────────────────────────────────
@@ -48,8 +52,9 @@ contract VaultMatch is IVaultMatch, Ownable, Pausable, ReentrancyGuard {
         uint256 _matchId,
         string memory _teamA,
         string memory _teamB
-    ) Ownable(_owner) {
-        require(_oracle != address(0), "Invalid oracle");
+    ) {
+        // Receiver sets Ownable(msg.sender); fix owner to the intended admin EOA
+        _transferOwnership(_owner);
 
         oracle = _oracle;
         MATCH_ID = _matchId;
@@ -61,8 +66,9 @@ contract VaultMatch is IVaultMatch, Ownable, Pausable, ReentrancyGuard {
         USDC.forceApprove(address(MORPHO_VAULT), type(uint256).max);
     }
 
+    /// @dev Caller must be oracle (Chainlink forwarder) or owner (admin EOA).
     modifier onlyOracle() {
-        if (msg.sender != oracle) revert OnlyOracle();
+        if (msg.sender != oracle && msg.sender != owner()) revert OnlyOracle();
         _;
     }
 
@@ -107,30 +113,16 @@ contract VaultMatch is IVaultMatch, Ownable, Pausable, ReentrancyGuard {
         emit Claimed(msg.sender, principal, yieldShare);
     }
 
-    // ── Oracle Actions ───────────────────────────────────────────────────
+    // ── Oracle Actions (direct calls) ────────────────────────────────────
 
+    /// @notice Direct call path — used by panel-v2 admin or tests.
+    ///         In production, CRE routes through onReport() via the Keystone Forwarder.
     function lockMatch() external onlyOracle whenNotPaused {
-        if (status != MatchStatus.Open) revert MatchNotOpen();
-        status = MatchStatus.Locked;
-        _depositToYield();
-        emit MatchLocked(MATCH_ID);
+        _executeLock();
     }
 
     function resolveMatch(Team _winner) external onlyOracle whenNotPaused {
-        if (status != MatchStatus.Locked) revert MatchNotLocked();
-        if (_winner != Team.TeamA && _winner != Team.TeamB)
-            revert InvalidWinner();
-
-        uint256 totalWinSide = (_winner == Team.TeamA)
-            ? totalTeamA
-            : totalTeamB;
-        if (totalWinSide == 0) revert NoWinnerDeposits();
-
-        status = MatchStatus.Resolved;
-        winner = _winner;
-        _withdrawFromYield();
-
-        emit MatchResolved(MATCH_ID, _winner);
+        _executeResolve(_winner);
     }
 
     // ── Admin / Safety Module ────────────────────────────────────────────
@@ -203,7 +195,48 @@ contract VaultMatch is IVaultMatch, Ownable, Pausable, ReentrancyGuard {
         return principal + yieldShare;
     }
 
-    // ── Internal Helpers ─────────────────────────────────────────────────
+    // ── Chainlink CRE Receiver ───────────────────────────────────────────
+
+    /// @notice Called by Receiver.onReport() after forwarder validation.
+    /// @dev rawReport (EncodedPayload from CRE):
+    ///        lockMatch()          → 4-byte selector
+    ///        resolveMatch(uint8)  → 4-byte selector + 32-byte ABI-encoded winner
+    function _processReport(bytes calldata report) internal override whenNotPaused {
+        if (report.length < 4) return;
+        bytes4 sel = bytes4(report);
+        if (sel == this.lockMatch.selector) {
+            _executeLock();
+        } else if (sel == this.resolveMatch.selector && report.length >= 36) {
+            Team w = abi.decode(report[4:], (Team));
+            _executeResolve(w);
+        }
+    }
+
+    // ── Internal — Shared Logic ──────────────────────────────────────────
+
+    function _executeLock() internal {
+        if (status != MatchStatus.Open) revert MatchNotOpen();
+        status = MatchStatus.Locked;
+        _depositToYield();
+        emit MatchLocked(MATCH_ID);
+    }
+
+    function _executeResolve(Team _winner) internal {
+        if (status != MatchStatus.Locked) revert MatchNotLocked();
+        if (_winner != Team.TeamA && _winner != Team.TeamB)
+            revert InvalidWinner();
+
+        uint256 totalWinSide = (_winner == Team.TeamA)
+            ? totalTeamA
+            : totalTeamB;
+        if (totalWinSide == 0) revert NoWinnerDeposits();
+
+        status = MatchStatus.Resolved;
+        winner = _winner;
+        _withdrawFromYield();
+
+        emit MatchResolved(MATCH_ID, _winner);
+    }
 
     function _getUserTotal(address user) internal view returns (uint256) {
         return userDeposits[user][Team.TeamA] + userDeposits[user][Team.TeamB];
