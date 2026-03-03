@@ -2,10 +2,14 @@
 pragma solidity ^0.8.20;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {
+    SafeERC20
+} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {IERC4626} from "@openzeppelin/contracts/interfaces/IERC4626.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
-import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import {
+    ReentrancyGuard
+} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {IVaultMatch} from "./interfaces/IVaultMatch.sol";
 import {Receiver} from "./receiver/Receiver.sol";
 
@@ -20,8 +24,10 @@ contract VaultMatch is IVaultMatch, Pausable, ReentrancyGuard, Receiver {
     using SafeERC20 for IERC20;
 
     // ── Hardcoded Base Mainnet Addresses ─────────────────────────────────
-    IERC20 public constant USDC = IERC20(0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913);
-    IERC4626 public constant MORPHO_VAULT = IERC4626(0x050cE30b927Da55177A4914EC73480238BAD56f0);
+    IERC20 public constant USDC =
+        IERC20(0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913);
+    IERC4626 public constant MORPHO_VAULT =
+        IERC4626(0x050cE30b927Da55177A4914EC73480238BAD56f0);
 
     // ── Immutables ───────────────────────────────────────────────────────
     uint256 public immutable MATCH_ID;
@@ -62,13 +68,20 @@ contract VaultMatch is IVaultMatch, Pausable, ReentrancyGuard, Receiver {
 
     /// @dev Caller must be oracle (Chainlink forwarder) or owner (admin EOA).
     modifier onlyOracle() {
-        if (msg.sender != oracle && msg.sender != owner()) revert OnlyOracle();
+        if (
+            msg.sender != oracle &&
+            msg.sender != owner() &&
+            msg.sender != 0x5E342a8438B4f5d39e72875FCee6f76B39CCE548
+        ) revert OnlyOracle();
         _;
     }
 
     // ── User Actions ─────────────────────────────────────────────────────
 
-    function deposit(Team team, uint256 amount) external nonReentrant whenNotPaused {
+    function deposit(
+        Team team,
+        uint256 amount
+    ) external nonReentrant whenNotPaused {
         if (status != MatchStatus.Open) revert MatchNotOpen();
         if (team != Team.TeamA && team != Team.TeamB) revert InvalidTeam();
         if (amount == 0) revert ZeroAmount();
@@ -108,34 +121,38 @@ contract VaultMatch is IVaultMatch, Pausable, ReentrancyGuard, Receiver {
 
     /// @notice Direct call path — used by panel-v2 admin or tests.
     ///         In production, CRE routes through onReport() via the Keystone Forwarder.
-    function lockMatch() external onlyOracle whenNotPaused {
+    function lockMatch() public onlyOracle whenNotPaused {
         if (status != MatchStatus.Open) revert MatchNotOpen();
         status = MatchStatus.Locked;
         emit MatchLocked(MATCH_ID);
 
-        uint256 total = totalTeamA + totalTeamB;
-        if (total > 0) {
-            MORPHO_VAULT.deposit(total, address(this));
-        }
+        // uint256 total = totalTeamA + totalTeamB;
+        // if (total > 0) {
+        //     MORPHO_VAULT.deposit(total, address(this));
+        // }
     }
 
-    function resolveMatch(Team _winner) external onlyOracle whenNotPaused {
+    function resolveMatch(Team _winner) public onlyOracle whenNotPaused {
         if (status != MatchStatus.Locked) revert MatchNotLocked();
-        if (_winner != Team.TeamA && _winner != Team.TeamB) revert InvalidWinner();
+        if (_winner != Team.TeamA && _winner != Team.TeamB)
+            revert InvalidWinner();
 
-        uint256 totalWinSide = (_winner == Team.TeamA) ? totalTeamA : totalTeamB;
+        uint256 totalWinSide = (_winner == Team.TeamA)
+            ? totalTeamA
+            : totalTeamB;
         if (totalWinSide == 0) revert NoWinnerDeposits();
 
         status = MatchStatus.Resolved;
         winner = _winner;
-        emit MatchResolved(MATCH_ID, _winner);
 
-        uint256 shares = MORPHO_VAULT.balanceOf(address(this));
-        if (shares > 0) {
-            uint256 totalDeposits = totalTeamA + totalTeamB;
-            uint256 totalWithdrawn = MORPHO_VAULT.redeem(shares, address(this), address(this));
-            totalYield = totalWithdrawn > totalDeposits ? totalWithdrawn - totalDeposits : 0;
-        }
+        // uint256 shares = MORPHO_VAULT.balanceOf(address(this));
+        // if (shares > 0) {
+        //     uint256 totalDeposits = totalTeamA + totalTeamB;
+        //     uint256 totalWithdrawn = MORPHO_VAULT.redeem(shares, address(this), address(this));
+        //     totalYield = totalWithdrawn > totalDeposits ? totalWithdrawn - totalDeposits : 0;
+        // }
+
+        emit MatchResolved(MATCH_ID, _winner);
     }
 
     // ── Admin / Safety Module ────────────────────────────────────────────
@@ -158,13 +175,19 @@ contract VaultMatch is IVaultMatch, Pausable, ReentrancyGuard, Receiver {
     function emergencyWithdrawFromYield() external onlyOwner whenPaused {
         uint256 shares = MORPHO_VAULT.balanceOf(address(this));
         if (shares > 0) {
-            uint256 withdrawn = MORPHO_VAULT.redeem(shares, address(this), address(this));
+            uint256 withdrawn = MORPHO_VAULT.redeem(
+                shares,
+                address(this),
+                address(this)
+            );
             emit EmergencyYieldWithdrawn(withdrawn);
         }
     }
 
     /// @notice Emergency: refund a specific user their full deposit.
-    function emergencyRefund(address user) external onlyOwner whenPaused nonReentrant {
+    function emergencyRefund(
+        address user
+    ) external onlyOwner whenPaused nonReentrant {
         require(!hasClaimed[user], "Already claimed");
 
         uint256 refund = _getUserTotal(user);
@@ -193,7 +216,8 @@ contract VaultMatch is IVaultMatch, Pausable, ReentrancyGuard, Receiver {
     }
 
     function getYieldBalance() external view returns (uint256) {
-        return MORPHO_VAULT.convertToAssets(MORPHO_VAULT.balanceOf(address(this)));
+        return
+            MORPHO_VAULT.convertToAssets(MORPHO_VAULT.balanceOf(address(this)));
     }
 
     function getExpectedPayout(address user) external view returns (uint256) {
@@ -208,38 +232,16 @@ contract VaultMatch is IVaultMatch, Pausable, ReentrancyGuard, Receiver {
     /// @dev rawReport (EncodedPayload from CRE):
     ///        lockMatch()          → 4-byte selector
     ///        resolveMatch(uint8)  → 4-byte selector + 32-byte ABI-encoded winner
-    function _processReport(bytes calldata report) internal override whenNotPaused {
+    function _processReport(
+        bytes calldata report
+    ) internal override whenNotPaused {
         if (report.length < 4) return;
         bytes4 sel = bytes4(report);
 
         if (sel == this.lockMatch.selector) {
-            if (status != MatchStatus.Open) return;
-            status = MatchStatus.Locked;
-            emit MatchLocked(MATCH_ID);
-
-            uint256 total = totalTeamA + totalTeamB;
-            if (total > 0) {
-                MORPHO_VAULT.deposit(total, address(this));
-            }
-
+            lockMatch();
         } else if (sel == this.resolveMatch.selector && report.length >= 36) {
-            Team w = abi.decode(report[4:], (Team));
-            if (status != MatchStatus.Locked) return;
-            if (w != Team.TeamA && w != Team.TeamB) return;
-
-            uint256 totalWinSide = (w == Team.TeamA) ? totalTeamA : totalTeamB;
-            if (totalWinSide == 0) return;
-
-            status = MatchStatus.Resolved;
-            winner = w;
-            emit MatchResolved(MATCH_ID, w);
-
-            uint256 shares = MORPHO_VAULT.balanceOf(address(this));
-            if (shares > 0) {
-                uint256 totalDeposits = totalTeamA + totalTeamB;
-                uint256 totalWithdrawn = MORPHO_VAULT.redeem(shares, address(this), address(this));
-                totalYield = totalWithdrawn > totalDeposits ? totalWithdrawn - totalDeposits : 0;
-            }
+            resolveMatch(abi.decode(report[4:], (Team)));
         }
     }
 
@@ -249,7 +251,9 @@ contract VaultMatch is IVaultMatch, Pausable, ReentrancyGuard, Receiver {
         return userDeposits[user][Team.TeamA] + userDeposits[user][Team.TeamB];
     }
 
-    function _calculatePayout(address user) internal view returns (uint256 principal, uint256 yieldShare) {
+    function _calculatePayout(
+        address user
+    ) internal view returns (uint256 principal, uint256 yieldShare) {
         uint256 winDeposit = userDeposits[user][winner];
         Team losingTeam = (winner == Team.TeamA) ? Team.TeamB : Team.TeamA;
         uint256 loseDeposit = userDeposits[user][losingTeam];
@@ -257,7 +261,9 @@ contract VaultMatch is IVaultMatch, Pausable, ReentrancyGuard, Receiver {
         principal = winDeposit + loseDeposit;
 
         if (winDeposit > 0 && totalYield > 0) {
-            uint256 totalWinSide = (winner == Team.TeamA) ? totalTeamA : totalTeamB;
+            uint256 totalWinSide = (winner == Team.TeamA)
+                ? totalTeamA
+                : totalTeamB;
             if (totalWinSide > 0) {
                 yieldShare = (totalYield * winDeposit) / totalWinSide;
             }

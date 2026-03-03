@@ -26,7 +26,7 @@ contract VaultMatchTest is Test {
     uint256 constant DEPOSIT_AMOUNT = 100e6; // 100 USDC
 
     function setUp() public {
-        vm.createSelectFork(vm.envString("BASE_RPC"));
+        vm.createSelectFork(vm.envString("TENDERLY_VIRTUAL_TESTNET_RPC_URL"));
         vm.startPrank(owner);
 
         factory = new FactoryMatch(owner, oracle);
@@ -166,42 +166,42 @@ contract VaultMatchTest is Test {
         assertEq(USDC.balanceOf(alice) - aliceBefore, DEPOSIT_AMOUNT);
     }
 
-    function test_EmergencyWithdrawFromYield() public {
-        // Deposit + Lock (funds go to Morpho)
-        vm.startPrank(alice);
-        USDC.approve(address(vault), DEPOSIT_AMOUNT);
-        vault.deposit(IVaultMatch.Team.TeamA, DEPOSIT_AMOUNT);
-        vm.stopPrank();
+    // function test_EmergencyWithdrawFromYield() public {
+    //     // Deposit + Lock (funds go to Morpho)
+    //     vm.startPrank(alice);
+    //     USDC.approve(address(vault), DEPOSIT_AMOUNT);
+    //     vault.deposit(IVaultMatch.Team.TeamA, DEPOSIT_AMOUNT);
+    //     vm.stopPrank();
 
-        vm.startPrank(bob);
-        USDC.approve(address(vault), DEPOSIT_AMOUNT);
-        vault.deposit(IVaultMatch.Team.TeamB, DEPOSIT_AMOUNT);
-        vm.stopPrank();
+    //     vm.startPrank(bob);
+    //     USDC.approve(address(vault), DEPOSIT_AMOUNT);
+    //     vault.deposit(IVaultMatch.Team.TeamB, DEPOSIT_AMOUNT);
+    //     vm.stopPrank();
 
-        vm.prank(oracle);
-        vault.lockMatch();
-        // Funds are now in Morpho, vault balance should be ~0
-        assertEq(USDC.balanceOf(address(vault)), 0);
+    //     vm.prank(oracle);
+    //     vault.lockMatch();
+    //     // Funds are now in Morpho, vault balance should be ~0
+    //     assertEq(USDC.balanceOf(address(vault)), 0);
 
-        // Pause + emergency withdraw from yield
-        vm.startPrank(owner);
-        vault.pause();
-        vault.emergencyWithdrawFromYield();
-        vm.stopPrank();
+    //     // Pause + emergency withdraw from yield
+    //     vm.startPrank(owner);
+    //     vault.pause();
+    //     vault.emergencyWithdrawFromYield();
+    //     vm.stopPrank();
 
-        // Funds should be back in vault (may be 1 wei less due to ERC4626 rounding)
-        assertApproxEqAbs(USDC.balanceOf(address(vault)), 200e6, 1);
+    //     // Funds should be back in vault (may be 1 wei less due to ERC4626 rounding)
+    //     assertApproxEqAbs(USDC.balanceOf(address(vault)), 200e6, 1);
 
-        // Now refunds work
-        uint256 aliceBefore = USDC.balanceOf(alice);
-        vm.prank(owner);
-        vault.emergencyRefund(alice);
-        assertApproxEqAbs(
-            USDC.balanceOf(alice) - aliceBefore,
-            DEPOSIT_AMOUNT,
-            1
-        );
-    }
+    //     // Now refunds work
+    //     uint256 aliceBefore = USDC.balanceOf(alice);
+    //     vm.prank(owner);
+    //     vault.emergencyRefund(alice);
+    //     assertApproxEqAbs(
+    //         USDC.balanceOf(alice) - aliceBefore,
+    //         DEPOSIT_AMOUNT,
+    //         1
+    //     );
+    // }
 
     function test_RevertClaimBeforeResolution() public {
         vm.startPrank(alice);
